@@ -16,3 +16,8 @@ detected_3d_slider_by_cluster.html
 
 slurm-*.out
 slurm-*.err
+
+freeosc_202502.pdf
+freeosc_202502.txt
+shelly.txt
+.cache/

@@ -1,11 +1,13 @@
 #!/bin/bash
 #SBATCH -J shelly_cut
+#SBATCH -p cpu
 #SBATCH -o slurm-%j.out
 #SBATCH -e slurm-%j.err
+#SBATCH --get-user-env
 #SBATCH --nodes=1
-#SBATCH --ntasks-per-node=8
-#SBATCH --cpus-per-task=2
-#SBATCH --mem=48G
+#SBATCH --ntasks=24
+#SBATCH --cpus-per-task=1
+#SBATCH --mem=64G
 #SBATCH --time=12:00:00
 
 set -euo pipefail
@@ -15,9 +17,17 @@ cd "$WORKPATH"
 
 if command -v conda >/dev/null 2>&1; then
     eval "$(conda shell.bash hook)"
+elif [ -f "$HOME/miniconda3/etc/profile.d/conda.sh" ]; then
+    . "$HOME/miniconda3/etc/profile.d/conda.sh"
+elif [ -f "$HOME/miniforge3/etc/profile.d/conda.sh" ]; then
+    . "$HOME/miniforge3/etc/profile.d/conda.sh"
+fi
+
+if command -v conda >/dev/null 2>&1; then
     conda activate obspy
 fi
 
+# Program behavior defaults belong in config.py; this script only sets runtime environment.
 export PYTHONUNBUFFERED=1
 export OMP_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1

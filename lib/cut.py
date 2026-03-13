@@ -128,6 +128,9 @@ def load_waveforms(data_path, event_dic, event_ids, sta_name="XX.C038", channel=
                 start_time = phase_time - config.t_before_for_filter
                 end_time = phase_time + config.t_after_for_filter
                 st_tmp = cached_stream.slice(starttime=start_time, endtime=end_time).copy()
+                if len(st_tmp) == 0:
+                    continue
+                st_tmp.merge(method=1, fill_value=0.0)
                 st_tmp.detrend("demean")
                 st_tmp.detrend("linear")
                 st_tmp.taper(max_percentage=0.05, type="cosine")
@@ -141,7 +144,7 @@ def load_waveforms(data_path, event_dic, event_ids, sta_name="XX.C038", channel=
 
                 if phase_id == 0:
                     if s_time != -1:
-                        ps_delta = s_time - phase_time - 0.25
+                        ps_delta = s_time - phase_time - t_before
                         if ps_delta < t_after:
                             st_tmp = st_tmp.trim(
                                 starttime=phase_time - t_before,

@@ -17,39 +17,27 @@ from lib.cut import read_fsta
 # 所产生的模板-检测事件对应关系, 无法机械地完全复现 Shelly (2016)
 # 只在模板及其检测事件之间计算测量的那一层工作流。
 #
-# 因此当前默认实现采用 Shelly-proxy 模式:
-# 1. 使用 signed correlation coefficient 作为相对极性测量
-# 2. 对低于阈值的 |CC| 直接置零
-# 3. 使用 SVD 的第一左奇异向量构造事件特征
+# 因此当前实现统一采用一条 Shelly 风格主线:
+# 1. 在允许时滞窗内寻找主峰和次峰
+# 2. 用 sign(primary) * (|primary| - |secondary|) 构造相对极性测量
+# 3. 对主峰 |CC| 过低的测量置零
+# 4. 使用 SVD 的第一左奇异向量构造事件特征
 #
-# 其中第 2 步是代理约束:
+# 其中 |CC| 阈值仍然带有代理约束性质:
 # 用低 CC 置零去近似 "只有模板及其相关 detected event 才有有效测量"。
 #
-# 下列参数/模式不是 Shelly (2016) 文中直接给出的固定参数:
-# - SHELLY2016_PROXY_ABS_CC_MIN = 0.5
-# - LEGACY_PEAK_GAP_CC_MIN = 0.5
-# - LEGACY_PEAK_GAP_WEIGHT_MIN = 1e-5
-# - RELATIVE_POLARITY_MODE = "legacy_peak_gap"
-# - SVD_MODE = "lowrank"
+# 下列参数不是 Shelly (2016) 文中直接给出的固定参数:
+# - config.step2_shelly2016_abs_cc_min
+#
+# 默认参数统一放在 config.py 的 Step 2 区域。
 # =========================================================
-RELATIVE_POLARITY_MODE = os.environ.get(
-    "CC_RELATIVE_POLARITY_MODE",
-    "shelly2016_proxy",
-)
-
-SHELLY2016_SIGNED_CC_ABS_MIN = None
-SHELLY2016_PROXY_ABS_CC_MIN = 0.5
-
-LEGACY_PEAK_GAP_CC_MIN = 0.5
-LEGACY_PEAK_GAP_WEIGHT_MIN = 1e-5
-TEMPLATE_BATCH_SIZE = int(os.environ.get("CC_TEMPLATE_BATCH_SIZE", "4"))
-SVD_MODE = os.environ.get("CC_SVD_MODE", "reduced")  # "reduced" or "lowrank"
-LOWRANK_NITER = int(os.environ.get("CC_SVD_NITER", "2"))
+SHELLY2016_ABS_CC_MIN = config.step2_shelly2016_abs_cc_min
+TEMPLATE_BATCH_SIZE = int(config.step2_template_batch_size)
 
 
 def slice_correlation_lag_window(corr_mat, pha_id, fs):
     pha_id = int(pha_id)
-    lag_max_sec = 0.5 if pha_id == 0 else 0.8
+    lag_max_sec = float(config.step2_lag_max_sec[pha_id])
     lag_max_samp = int(round(lag_max_sec * fs))
 
     nlag = corr_mat.shape[-1]
@@ -62,20 +50,17 @@ def slice_correlation_lag_window(corr_mat, pha_id, fs):
     return corr_use, abs_use
 
 
-def get_peak_signed_correlation(corr_mat, pha_id, fs):
-    corr_use, abs_use = slice_correlation_lag_window(corr_mat, pha_id, fs)
-
-    idx1 = torch.argmax(abs_use, dim=-1, keepdim=True)
-    cc1 = torch.gather(corr_use, -1, idx1).squeeze(-1)
-    abs1 = torch.gather(abs_use, -1, idx1).squeeze(-1)
-    return cc1, abs1
-
-
-def get_weighted_relative_polarity(corr_mat, pha_id, fs, min_sep_sec=0.03):
+def get_shelly2016_relative_polarity(corr_mat, pha_id, fs, min_sep_sec=None):
+    # Shelly-style relative polarity measurement:
+    # 1) find the largest-|CC| peak within the allowed lag window
+    # 2) find the strongest secondary peak outside a minimum separation
+    # 3) use sign(primary) * (|primary| - |secondary|) as the measurement
     corr_use, abs_use = slice_correlation_lag_window(corr_mat, pha_id, fs)
     idx1 = torch.argmax(abs_use, dim=-1, keepdim=True)
     cc1 = torch.gather(corr_use, -1, idx1).squeeze(-1)
     abs1 = torch.gather(abs_use, -1, idx1).squeeze(-1)
+    if min_sep_sec is None:
+        min_sep_sec = config.step2_shelly2016_min_peak_sep_sec
     min_sep_samp = max(1, int(round(min_sep_sec * fs)))
 
     idx_grid = torch.arange(corr_use.shape[-1], device=corr_use.device)
@@ -89,15 +74,13 @@ def get_weighted_relative_polarity(corr_mat, pha_id, fs, min_sep_sec=0.03):
     abs2 = torch.gather(abs_use, -1, idx2).squeeze(-1)
 
     r = torch.sign(cc1) * (abs1 - abs2)
-    return r, abs1, abs2
+    return r, abs1
 
 
-def apply_pair_validity_mask(r, abs1, abs2, cc_min=None, weight_min=None):
+def apply_cc_threshold(r, abs1, cc_min=None):
     valid = torch.ones_like(r, dtype=torch.bool)
     if cc_min is not None:
         valid &= abs1 >= cc_min
-    if weight_min is not None:
-        valid &= (abs1 - abs2) >= weight_min
     return torch.where(valid, r, torch.zeros_like(r))
 
 
@@ -131,16 +114,8 @@ def first_left_singular_vector(r_k):
             return torch.zeros_like(col)
         return col / norm
 
-    if SVD_MODE == "reduced":
-        u, _, _ = torch.linalg.svd(r_k, full_matrices=False)
-        return u[:, 0]
-
-    if SVD_MODE == "lowrank":
-        q = min(2, min(r_k.shape))
-        u, _, _ = torch.svd_lowrank(r_k, q=q, niter=LOWRANK_NITER)
-        return u[:, 0]
-
-    raise ValueError("CC_SVD_MODE must be 'reduced' or 'lowrank'.")
+    u, _, _ = torch.linalg.svd(r_k, full_matrices=False)
+    return u[:, 0]
 
 
 def build_feature_column(temp_mat, detected_mat, pha_id, fs):
@@ -151,51 +126,17 @@ def build_feature_column(temp_mat, detected_mat, pha_id, fs):
         stop = min(start + batch_size, temp_mat.shape[0])
         temp_batch = temp_mat[start:stop, :]
         corr_mat = correlate_conv1d_matrix(temp_batch, detected_mat)
-
-        if RELATIVE_POLARITY_MODE == "shelly2016_signed_cc":
-            cc1, abs1 = get_peak_signed_correlation(
-                corr_mat=corr_mat,
-                pha_id=pha_id,
-                fs=fs,
-            )
-            if SHELLY2016_SIGNED_CC_ABS_MIN is None:
-                r = cc1
-            else:
-                r = torch.where(
-                    abs1 >= SHELLY2016_SIGNED_CC_ABS_MIN,
-                    cc1,
-                    torch.zeros_like(cc1),
-                )
-        elif RELATIVE_POLARITY_MODE == "shelly2016_proxy":
-            cc1, abs1 = get_peak_signed_correlation(
-                corr_mat=corr_mat,
-                pha_id=pha_id,
-                fs=fs,
-            )
-            r = torch.where(
-                abs1 >= SHELLY2016_PROXY_ABS_CC_MIN,
-                cc1,
-                torch.zeros_like(cc1),
-            )
-        elif RELATIVE_POLARITY_MODE == "legacy_peak_gap":
-            r, abs1, abs2 = get_weighted_relative_polarity(
-                corr_mat=corr_mat,
-                pha_id=pha_id,
-                fs=fs,
-                min_sep_sec=0.03,
-            )
-            r = apply_pair_validity_mask(
-                r=r,
-                abs1=abs1,
-                abs2=abs2,
-                cc_min=LEGACY_PEAK_GAP_CC_MIN,
-                weight_min=LEGACY_PEAK_GAP_WEIGHT_MIN,
-            )
-        else:
-            raise ValueError(
-                "CC_RELATIVE_POLARITY_MODE must be "
-                "'shelly2016_proxy', 'shelly2016_signed_cc', or 'legacy_peak_gap'."
-            )
+        r, abs1 = get_shelly2016_relative_polarity(
+            corr_mat=corr_mat,
+            pha_id=pha_id,
+            fs=fs,
+            min_sep_sec=None,
+        )
+        r = apply_cc_threshold(
+            r=r,
+            abs1=abs1,
+            cc_min=SHELLY2016_ABS_CC_MIN,
+        )
 
         r_k[:, start:stop] = r.transpose(0, 1)
 
@@ -232,7 +173,7 @@ def main():
     device = choose_device(rank)
     if device.type == "cuda":
         torch.cuda.set_device(device)
-        torch.backends.cudnn.benchmark = True
+        torch.backends.cudnn.benchmark = bool(config.step2_enable_cudnn_benchmark)
     combined_r = None
 
     for count, (sta, channel_code, pha_id) in enumerate(jobs_for_rank, start=1):
@@ -295,19 +236,13 @@ def main():
     for chunk in valid_chunks:
         combined_rr += chunk.astype(np.float32, copy=False)
 
-    np.save("combined_RR_all_2col.npy", combined_rr)
+    np.save(config.step2_feature_matrix_out, combined_rr)
     print(f"total time: {time.time() - t0}")
-    print(f"[INFO] Saved combined feature matrix: combined_RR_all_2col.npy")
-    print(f"[INFO] Relative polarity mode     : {RELATIVE_POLARITY_MODE}")
-    if RELATIVE_POLARITY_MODE == "shelly2016_proxy":
-        print(f"[INFO] Shelly proxy |CC| min    : {SHELLY2016_PROXY_ABS_CC_MIN}")
-    elif RELATIVE_POLARITY_MODE == "shelly2016_signed_cc":
-        print(f"[INFO] Strict Shelly |CC| min   : {SHELLY2016_SIGNED_CC_ABS_MIN}")
-    else:
-        print(f"[INFO] Legacy peak-gap cc min   : {LEGACY_PEAK_GAP_CC_MIN}")
-        print(f"[INFO] Legacy peak-gap w min    : {LEGACY_PEAK_GAP_WEIGHT_MIN}")
+    print(f"[INFO] Saved combined feature matrix: {config.step2_feature_matrix_out}")
+    print("[INFO] Relative polarity mode     : shelly2016")
+    print(f"[INFO] Shelly |CC| min          : {SHELLY2016_ABS_CC_MIN}")
+    print(f"[INFO] Shelly min peak sep (s)  : {config.step2_shelly2016_min_peak_sep_sec}")
     print(f"[INFO] CC template batch size    : {TEMPLATE_BATCH_SIZE}")
-    print(f"[INFO] CC SVD mode               : {SVD_MODE}")
 
 
 if __name__ == "__main__":

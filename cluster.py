@@ -1,16 +1,24 @@
 import os
-from dataclasses import dataclass
 from datetime import datetime, timezone
 
 import config
+
+if getattr(config, "step3_mplconfig_dir", None):
+    mplconfig_dir = os.path.abspath(config.step3_mplconfig_dir)
+    os.makedirs(mplconfig_dir, exist_ok=True)
+    os.environ.setdefault("MPLCONFIGDIR", mplconfig_dir)
+
 import matplotlib
 import numpy as np
 from matplotlib.colors import to_hex
 
-try:
-    matplotlib.use("TkAgg")
-except Exception:
-    matplotlib.use("Agg")
+if getattr(config, "step3_matplotlib_backend", None):
+    matplotlib.use(config.step3_matplotlib_backend)
+else:
+    if os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"):
+        matplotlib.use("TkAgg")
+    else:
+        matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from scipy.cluster.hierarchy import fcluster, linkage
@@ -25,100 +33,77 @@ from lib.cut import read_fpha_list
 # 事件极性向量 + cosine distance + hierarchical clustering
 #
 # 下列参数属于实现选择或展示设置, 不是 Shelly (2016) 文中明确给出的固定参数:
-# - LINKAGE_METHOD
-# - CLUSTER_CUT_MODE
-# - DISTANCE_CUT.threshold
-# - MAXCLUST_CUT.n_clusters
-# - TOP_N_SHOW / SHOW_NOISE / EXPORT_HTML
+# - config.step3_linkage_method
+# - config.step3_cluster_cut_mode
+# - config.step3_distance_cut_threshold
+# - config.step3_maxclust_n_clusters
+# - config.step3_top_n_show / config.step3_show_noise / config.step3_export_html
+#
+# 默认参数统一放在 config.py 的 Step 3 区域。
 # =========================================================
-@dataclass(frozen=True)
-class DistanceCutConfig:
-    threshold: float
-
-
-@dataclass(frozen=True)
-class MaxClustCutConfig:
-    n_clusters: int
-
-
 FDETECTED = config.fdetected
-PSVD_CANDIDATES = [
-    "combined_RR_all_2col.npy",
-    "combined_RR_all.npy",
-]
 
 # ---------- 公共参数 ----------
-LINKAGE_METHOD = "average"
-CLUSTER_CUT_MODE = "distance"  # "distance" or "maxclust"
-NORMALIZE_ROWS = False
+LINKAGE_METHOD = config.step3_linkage_method
+CLUSTER_CUT_MODE = config.step3_cluster_cut_mode  # "distance" or "maxclust"
 
-# ---------- distance 模式专属参数 ----------
-DISTANCE_CUT = DistanceCutConfig(
-    threshold=0.40,
-)
-
-# ---------- maxclust 模式专属参数 ----------
-MAXCLUST_CUT = MaxClustCutConfig(
-    n_clusters=50,
-)
+DISTANCE_THRESHOLD = config.step3_distance_cut_threshold
+MAXCLUST_N_CLUSTERS = config.step3_maxclust_n_clusters
 
 # ---------- 绘图与输出 ----------
-TOP_N_SHOW = 5
-SHOW_NOISE = False
-SAVE_FIG = True
-FIG_OUT = "cluster_map_profiles.png"
-POINT_SIZE = 5
-BG_POINT_SIZE = 2.5
+TOP_N_SHOW = config.step3_top_n_show
+SHOW_NOISE = config.step3_show_noise
+SAVE_FIG = config.step3_save_fig
+FIG_OUT = config.step3_fig_out
+POINT_SIZE = config.step3_point_size
+BG_POINT_SIZE = config.step3_bg_point_size
 
 # ---------- HTML 时间滑条输出 ----------
-EXPORT_HTML = True
-HTML_OUT = "detected_3d_slider_by_cluster.html"
-HTML_MARKER_SIZE = 1.2
-HTML_SLIDER_NFRAMES = 120
-OTHER_CLUSTER_COLOR = "#B0B0B0"
-MAG_HIGHLIGHT = 3.0
-MAG_HIGHLIGHT_MULT = 4.0
-FUTURE_ALPHA = 0.20
-PAST_ALPHA = 0.90
+EXPORT_HTML = config.step3_export_html
+HTML_OUT = config.step3_html_out
+HTML_MARKER_SIZE = config.step3_html_marker_size
+HTML_SLIDER_NFRAMES = config.step3_html_slider_nframes
+OTHER_CLUSTER_COLOR = config.step3_other_cluster_color
+MAG_HIGHLIGHT = config.step3_mag_highlight
+MAG_HIGHLIGHT_MULT = config.step3_mag_highlight_mult
+FUTURE_ALPHA = config.step3_future_alpha
+PAST_ALPHA = config.step3_past_alpha
 
 
 def get_cut_plan(n_valid):
     if CLUSTER_CUT_MODE == "distance":
-        if DISTANCE_CUT.threshold <= 0:
-            raise ValueError("DISTANCE_CUT.threshold must be > 0.")
+        if DISTANCE_THRESHOLD <= 0:
+            raise ValueError("DISTANCE_THRESHOLD must be > 0.")
         return {
             "criterion": "distance",
-            "t": DISTANCE_CUT.threshold,
+            "t": DISTANCE_THRESHOLD,
             "label": "distance",
-            "value_text": f"{DISTANCE_CUT.threshold}",
+            "value_text": f"{DISTANCE_THRESHOLD}",
         }
 
     if CLUSTER_CUT_MODE == "maxclust":
-        if MAXCLUST_CUT.n_clusters <= 0:
-            raise ValueError("MAXCLUST_CUT.n_clusters must be > 0.")
-        n_clusters_eff = min(int(MAXCLUST_CUT.n_clusters), int(n_valid))
+        if MAXCLUST_N_CLUSTERS <= 0:
+            raise ValueError("MAXCLUST_N_CLUSTERS must be > 0.")
+        n_clusters_eff = min(int(MAXCLUST_N_CLUSTERS), int(n_valid))
         return {
             "criterion": "maxclust",
             "t": n_clusters_eff,
             "label": "maxclust",
-            "value_text": f"{MAXCLUST_CUT.n_clusters} (effective={n_clusters_eff})",
+            "value_text": f"{MAXCLUST_N_CLUSTERS} (effective={n_clusters_eff})",
         }
 
     raise ValueError("CLUSTER_CUT_MODE must be 'distance' or 'maxclust'.")
 
 
-def load_psvd(candidates):
-    for fn in candidates:
-        if os.path.exists(fn):
-            arr = np.load(fn)
-            print(f"[INFO] Loaded PSVD from: {fn}, shape={arr.shape}")
-            return arr, fn
-    raise FileNotFoundError(
-        "Cannot find PSVD file. Tried:\n" + "\n".join(candidates)
-    )
+def load_feature_matrix(path):
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Feature matrix not found: {path}")
+    arr = np.load(path)
+    print(f"[INFO] Loaded feature matrix from: {path}, shape={arr.shape}")
+    return arr
 
 
-def sanitize_psvd(X):
+def sanitize_feature_matrix(X):
     X = np.asarray(X, dtype=float)
 
     finite_mask = np.all(np.isfinite(X), axis=1)
@@ -128,13 +113,6 @@ def sanitize_psvd(X):
 
     X_valid = X[valid_mask].copy()
     return X_valid, valid_mask
-
-
-def l2_normalize_rows(X, eps=1e-12):
-    norm = np.linalg.norm(X, axis=1, keepdims=True)
-    norm = np.maximum(norm, eps)
-    return X / norm
-
 
 def relabel_by_size(labels):
     labels = np.asarray(labels, dtype=int)
@@ -190,18 +168,18 @@ def cluster_medoid_info(X_proc_full, labels, all_event_ids, cluster_ids):
         gidx = idx[j]
 
         medoid_vecs[cid] = X_proc_full[gidx]
-        medoid_eids[cid] = int(all_event_ids[gidx])
+        medoid_eids[cid] = str(all_event_ids[gidx])
         medoid_indices[cid] = gidx
 
     return medoid_vecs, medoid_eids, medoid_indices
 
 
-def hierarchical_cluster_psvd(X):
-    X_valid_raw, valid_mask = sanitize_psvd(X)
+def hierarchical_cluster_features(X):
+    X_valid_raw, valid_mask = sanitize_feature_matrix(X)
     if X_valid_raw.shape[0] == 0:
         raise ValueError("No valid rows remain after removing NaN/Inf/zero rows.")
 
-    X_valid = l2_normalize_rows(X_valid_raw) if NORMALIZE_ROWS else X_valid_raw
+    X_valid = X_valid_raw
 
     labels_full = np.zeros(X.shape[0], dtype=int)
     X_proc_full = np.zeros_like(X, dtype=float)
@@ -209,7 +187,8 @@ def hierarchical_cluster_psvd(X):
 
     if X_valid.shape[0] == 1:
         labels_full[valid_mask] = 1
-        return labels_full, valid_mask, X_proc_full
+        cut_plan = get_cut_plan(1)
+        return labels_full, valid_mask, X_proc_full, cut_plan
 
     D = pdist(X_valid, metric="cosine")
     Z = linkage(D, method=LINKAGE_METHOD)
@@ -218,7 +197,7 @@ def hierarchical_cluster_psvd(X):
 
     labels_full[valid_mask] = labels_valid
     labels_full, _ = relabel_by_size(labels_full)
-    return labels_full, valid_mask, X_proc_full
+    return labels_full, valid_mask, X_proc_full, cut_plan
 
 
 def save_cluster_summary(out_file, cluster_ids, cluster_sizes, medoid_eids):
@@ -226,7 +205,7 @@ def save_cluster_summary(out_file, cluster_ids, cluster_sizes, medoid_eids):
         f.write("# rank  cluster_id  size  medoid_event_id\n")
         for rank, cid in enumerate(cluster_ids, start=1):
             f.write(
-                f"{rank:4d} {cid:10d} {cluster_sizes[cid]:6d} {medoid_eids.get(cid, -1):16d}\n"
+                f"{rank:4d} {cid:10d} {cluster_sizes[cid]:6d} {medoid_eids.get(cid, '-1')}\n"
             )
 
 
@@ -251,7 +230,7 @@ def save_cluster_distance_matrix(out_file, shown_cluster_ids, medoid_vecs):
 def get_event_xyz_from_dic(all_dic, event_ids):
     lats, lons, deps = [], [], []
     for eid in event_ids:
-        ot, lat, lon, dep, mag, evid = all_dic[str(int(eid))][0]
+        ot, lat, lon, dep, mag, evid = all_dic[str(eid)][0]
         lats.append(lat)
         lons.append(lon)
         deps.append(dep)
@@ -261,7 +240,7 @@ def get_event_xyz_from_dic(all_dic, event_ids):
 def collect_event_arrays(all_dic, event_ids):
     dt_utc, lat, lon, dep, mag = [], [], [], [], []
     for eid in event_ids:
-        ot, la, lo, de, ma, evid = all_dic[str(int(eid))][0]
+        ot, la, lo, de, ma, evid = all_dic[str(eid)][0]
         dt_utc.append(ot)
         lat.append(la)
         lon.append(lo)
@@ -665,23 +644,26 @@ def plot_map_and_profiles(
         plt.savefig(fig_out, dpi=220)
         print(f"[INFO] Saved figure: {fig_out}")
 
-    plt.show()
+    if plt.get_backend().lower().endswith("agg"):
+        plt.close(fig)
+    else:
+        plt.show()
 
 
 def main():
     detected_dic = read_fpha_list(FDETECTED)
-    detected_ids = np.array([int(x) for x in detected_dic.keys()])
+    detected_ids = np.array(list(detected_dic.keys()), dtype=object)
 
-    combined_RR, used_fn = load_psvd(PSVD_CANDIDATES)
+    used_fn = config.step2_feature_matrix_out
+    combined_RR = load_feature_matrix(used_fn)
 
     if combined_RR.shape[0] != len(detected_ids):
         raise ValueError(
-            f"PSVD row count ({combined_RR.shape[0]}) does not match "
+            f"Feature matrix row count ({combined_RR.shape[0]}) does not match "
             f"event count ({len(detected_ids)})."
         )
 
-    cut_plan = get_cut_plan(combined_RR.shape[0])
-    labels, valid_mask, X_proc_full = hierarchical_cluster_psvd(combined_RR)
+    labels, valid_mask, X_proc_full, cut_plan = hierarchical_cluster_features(combined_RR)
 
     cluster_ids, cluster_to_idx, cluster_sizes = build_cluster_order(labels)
     if len(cluster_ids) == 0:
@@ -739,8 +721,7 @@ def main():
     print(f"[INFO] Total events            : {len(detected_ids)}")
     print(f"[INFO] Valid rows for cluster  : {np.sum(valid_mask)}")
     print(f"[INFO] Invalid rows            : {np.sum(~valid_mask)}")
-    print(f"[INFO] PSVD file used          : {used_fn}")
-    print(f"[INFO] Row normalization       : {NORMALIZE_ROWS}")
+    print(f"[INFO] Feature matrix used     : {used_fn}")
     print(f"[INFO] Linkage method          : {LINKAGE_METHOD}")
     print(f"[INFO] Cluster cut mode        : {cut_plan['label']}")
     if cut_plan["label"] == "distance":
