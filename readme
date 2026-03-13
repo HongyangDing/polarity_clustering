@@ -257,6 +257,12 @@ sbatch submit_step2_cc_cal_gpu.sh
 
 当前 `submit_step2_cc_cal_gpu.sh` 默认申请 `--gres=gpu:a100:1` 以优先运行速度；如果你更看重排队成功率，只需要改这一行 GPU 资源申请，不需要改任何程序参数。
 
+freeosc 上的 Step 2 当前按已验证通过的启动方式运行：
+
+- 先加载 `devtoolset/11` 和 `intel/2020.4.304`
+- `obspy` 环境中的 `mpi4py` 需要绑定到 Intel MPI
+- 使用 `srun --mpi=pmi2` 启动 `cc_cal.py`
+
 ### Step 3：聚类与可视化
 
 ```bash

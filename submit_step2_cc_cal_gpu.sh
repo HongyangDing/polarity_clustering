@@ -16,6 +16,10 @@ set -euo pipefail
 WORKPATH="${SLURM_SUBMIT_DIR:-$PWD}"
 cd "$WORKPATH"
 
+module purge
+module load devtoolset/11
+module load intel/2020.4.304
+
 if command -v conda >/dev/null 2>&1; then
     eval "$(conda shell.bash hook)"
 elif [ -f "$HOME/miniconda3/etc/profile.d/conda.sh" ]; then
@@ -33,11 +37,20 @@ export PYTHONUNBUFFERED=1
 export OMP_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
 export MKL_NUM_THREADS=1
+export I_MPI_HYDRA_BOOTSTRAP=slurm
 
 echo "[INFO] step2 cc_cal.py started at $(date)"
 echo "[INFO] nodes=${SLURM_JOB_NUM_NODES:-1} ntasks=${SLURM_NTASKS:-1} cpus_per_task=${SLURM_CPUS_PER_TASK:-1}"
 echo "[INFO] gpus_on_node=${SLURM_GPUS_ON_NODE:-unknown} job_gpus=${SLURM_JOB_GPUS:-unknown}"
 echo "[INFO] Step 2 algorithm parameters come from config.py"
+echo "[INFO] Intel MPI bootstrap=${I_MPI_HYDRA_BOOTSTRAP}"
 nvidia-smi -L || true
-srun --cpu-bind=cores python -u cc_cal.py
+srun \
+  --mpi=pmi2 \
+  --unbuffered \
+  --ntasks="${SLURM_NTASKS}" \
+  --cpu-bind=cores \
+  --kill-on-bad-exit=1 \
+  --label \
+  python -u cc_cal.py
 echo "[INFO] step2 cc_cal.py finished at $(date)"
