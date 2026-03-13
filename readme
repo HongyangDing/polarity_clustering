@@ -1,0 +1,477 @@
+# Changning Plot
+
+## 项目目标
+
+这个项目实现了一条从地震目录和连续波形出发，到事件极性特征构建、层次聚类和结果可视化的完整流程。当前主线包含四个阶段：
+
+1. 从总目录中筛选模板事件，并生成模板目录与待分类目录。
+2. 按台站、分量和相位切出模板事件与待分类事件的波形矩阵。
+3. 由波形互相关构造相对极性特征，并通过奇异值分解得到每个事件的特征向量。
+4. 对事件特征向量进行层次聚类，并输出空间分布图、簇摘要和 HTML 时间滑条。
+
+这套流程的核心目标是得到一个事件级别的特征矩阵 `combined_RR_all_2col.npy`，然后基于该矩阵完成聚类分析。
+
+当前默认算法路径尽量贴近 Shelly (2016)：
+
+- 在 `cc_cal.py` 中默认使用 `signed correlation coefficient`
+- 由于当前流程没有直接使用 matched-filter 产生的模板-检测事件对应关系，
+  会把低于阈值的 `|CC|` 置零，作为 Shelly 工作流的代理近似
+- 使用 SVD 第一左奇异向量构造事件特征
+- 在 `cluster.py` 中使用 cosine distance 和层次聚类
+
+同时，仓库里仍保留了一些工程近似或性能开关，它们会在代码开头被明确标注为“不是 Shelly (2016) 明确参数”。
+其中聚类的 linkage 方法和切树方式目前被视为实现选择，而不是论文中已被这里唯一确认的固定值。
+
+## 当前仓库结构
+
+- `config.py`
+  主配置文件，定义目录路径、台站通道、时间窗、滤波参数和目录筛选阈值。
+- `sel_temp.py`
+  从总目录中筛选模板事件，并写出 `temp.pha` 和 `detected.pha`。
+- `cut_waveforms.py`
+  使用 MPI 并行切出模板事件和待分类事件的波形矩阵。
+- `cc_cal.py`
+  计算相对极性特征矩阵，并保存为 `combined_RR_all_2col.npy`。
+- `cluster.py`
+  读取特征矩阵，完成层次聚类并生成图件与文本输出。
+- `lib/cut.py`
+  提供目录读取、任务展开和波形截取工具函数。
+- `lib/corr.py`
+  提供基于 `torch.conv1d` 的归一化互相关函数。
+- `submit_step0_select.sh`
+  `sel_temp.py` 的 Slurm 提交脚本。
+- `submit_step1_cut_waveforms.sh`
+  `cut_waveforms.py` 的 Slurm 提交脚本。
+- `submit_step2_cc_cal_gpu.sh`
+  `cc_cal.py` 的 Slurm 提交脚本。
+- `submit_step3_cluster.sh`
+  `cluster.py` 的 Slurm 提交脚本。
+- `input/`
+  输入目录，当前至少包含 `xue.sta`、`temp.pha`、`detected.pha`。
+- `shelly.pdf`
+  参考论文。
+
+## 输入数据说明
+
+### 1. 台站文件
+
+`config.fsta` 默认指向 `./input/xue.sta`。
+
+文件每行格式应为：
+
+```text
+NET.STA,lat,lon,elevation
+```
+
+程序会读取台站代码、纬度、经度和高程。
+
+### 2. 事件目录文件
+
+`config.source_catalog` 是可选的总目录文件，供 `sel_temp.py` 使用。
+
+`config.ftemp` 和 `config.fdetected` 分别表示模板目录和待分类目录。目录文件按当前代码假定的格式组织：
+
+- 事件头行以年份开头，例如 `2023-...`
+- 事件头行字段顺序为：
+  `origin_time,lat,lon,dep,mag,event_id`
+- 后续每一行对应一个台站拾取，字段中至少要能解析出：
+  `net_sta,tp,ts,...`
+
+### 3. 波形目录
+
+`config.data_path` 指向波形根目录。当前代码假定单日单台单分量文件路径形式为：
+
+```text
+<data_path>/<YYYYMMDD>/<NET.STA>.<YYYYMMDD>.<CHANNEL>.mseed
+```
+
+例如：
+
+```text
+/path/to/data/20240101/SC.XYZ.20240101.BHZ.mseed
+```
+
+## 配置参数说明
+
+`config.py` 中当前使用的参数如下。
+
+### 目录与输入输出
+
+- `fsta`
+  台站文件路径。
+- `ftemp`
+  模板目录路径。
+- `fdetected`
+  待分类目录路径。
+- `source_catalog`
+  总目录路径，仅在 `sel_temp.py` 中使用。
+- `data_path`
+  波形根目录。
+- `output_detected`
+  待分类事件波形矩阵输出目录。
+- `output_temp`
+  模板事件波形矩阵输出目录。
+
+### 模板筛选参数
+
+- `template_min_magnitude`
+  模板事件最小震级阈值。
+- `template_min_station_count`
+  模板事件最少台站数阈值。
+
+### 通道与相位
+
+- `channel_list`
+  当前使用的分量列表，默认是 `BHN`、`BHE`、`BHZ`。
+- `phase_ids`
+  当前使用的相位编号列表，默认 `0` 表示 P 相，`1` 表示 S 相。
+
+### 截取时间窗
+
+- `P_t_before`、`P_t_after`
+  P 相波形窗口相对到时前后长度。
+- `S_t_before`、`S_t_after`
+  S 相波形窗口相对到时前后长度。
+- `t_before`、`t_after`
+  由上面两个窗口组成的列表形式，供代码按 `phase_id` 访问。
+- `t_before_for_filter`、`t_after_for_filter`
+  预留给滤波的扩展窗口长度。
+
+### 滤波与采样
+
+- `freq_min`
+  带通滤波低频。
+- `freq_max`
+  带通滤波高频。
+- `sampling_rate`
+  目标采样率。当前代码默认输入波形已经和该采样率一致。
+
+## 运行流程
+
+### Step 0: 生成模板目录和待分类目录
+
+运行脚本：
+
+```bash
+python sel_temp.py
+```
+
+或者：
+
+```bash
+sbatch submit_step0_select.sh
+```
+
+这一步会：
+
+- 读取 `config.source_catalog`
+- 根据震级和台站数筛选模板事件
+- 将所有事件写入 `config.fdetected`
+- 将被选中的模板事件额外写入 `config.ftemp`
+
+如果你已经有现成的 `temp.pha` 和 `detected.pha`，可以跳过这一步。
+
+### Step 1: 切出波形矩阵
+
+运行脚本：
+
+```bash
+python cut_waveforms.py
+```
+
+或者使用 MPI / Slurm：
+
+```bash
+sbatch submit_step1_cut_waveforms.sh
+```
+
+这一步会针对每个 `台站 × 分量 × 相位` 组合，分别对模板目录和待分类目录构建一个二维波形矩阵，输出为：
+
+- `output_detected/<sta>_<channel>_<phase>.npy`
+- `output_temp/<sta>_<channel>_<phase>.npy`
+
+矩阵形状为：
+
+```text
+(事件数, 时间采样点数)
+```
+
+矩阵行顺序与目录文件中的事件顺序一致。
+
+### Step 2: 计算事件特征矩阵
+
+运行脚本：
+
+```bash
+python cc_cal.py
+```
+
+或者：
+
+```bash
+sbatch submit_step2_cc_cal_gpu.sh
+```
+
+这一步会：
+
+- 逐个读取每个 `台站 × 分量 × 相位` 的模板矩阵和待分类矩阵
+- 通过归一化互相关提取相对极性测量
+- 对每个观测块做奇异值分解，取第一左奇异向量作为该观测块对所有待分类事件的贡献
+- 把所有观测块拼接成最终事件特征矩阵 `combined_RR_all_2col.npy`
+
+默认情况下，这一步使用 Shelly-proxy 模式：
+
+- 先用 Shelly (2016) 风格的 `signed correlation coefficient` 作为相对极性测量
+- 再把低于阈值的 `|CC|` 置零
+
+这样做的目的是在没有 matched-filter 模板-检测事件对应关系的前提下，近似模拟“只有模板及其相关 detected event 才有有效测量”的约束。旧版的主峰-次峰差值加权方法仍然保留为兼容模式。
+
+输出文件：
+
+- `combined_RR_all_2col.npy`
+
+该矩阵形状为：
+
+```text
+(待分类事件数, 台站-分量-相位组合数)
+```
+
+### Step 3: 聚类与可视化
+
+运行脚本：
+
+```bash
+python cluster.py
+```
+
+或者：
+
+```bash
+sbatch submit_step3_cluster.sh
+```
+
+这一步会：
+
+- 读取 `combined_RR_all_2col.npy`
+- 去掉无效行或零向量行
+- 用 cosine distance 计算事件间距离
+- 用层次聚类生成簇标签
+- 输出簇摘要、簇间距离矩阵、平面图和剖面图
+- 生成按时间滑动显示的 HTML 三维可视化
+
+输出文件包括：
+
+- `cluster_labels.npy`
+  所有事件的簇标签。
+- `cluster_valid_mask.npy`
+  标记哪些事件行参与了聚类。
+- `cluster_summary.txt`
+  每个簇的排序、大小和代表事件编号。
+- `cluster_distance_matrix.txt`
+  展示簇之间的 representative vector 余弦距离。
+- `cluster_map_profiles.png`
+  平面图和两个剖面图。
+- `detected_3d_slider_by_cluster.html`
+  时间滑条 HTML 可视化。
+
+## 各文件函数说明
+
+### `sel_temp.py`
+
+- `select_template_event_ids(event_dic, min_magnitude, min_station_count)`
+  遍历总目录中的事件，根据震级和台站数筛选模板事件编号集合。
+- `write_template_and_detected_catalogs(event_lines, template_ids, template_out, detected_out)`
+  将总目录中的原始文本按事件写回到模板目录和待分类目录。
+- `main()`
+  负责读取 `source_catalog`、执行筛选并输出结果。
+
+### `cut_waveforms.py`
+
+- `prepare_jobs()`
+  根据台站表、通道列表和相位列表展开全部波形切片任务。
+- `cut_catalog_waveforms(dataset_name, catalog_path, output_dir, jobs_for_rank, rank)`
+  对某一个目录文件执行实际切波形并写出矩阵。
+- `main()`
+  使用 MPI 分发任务，并依次处理 `detected` 和 `temp` 两个目录。
+
+### `cc_cal.py`
+
+- `get_weighted_relative_polarity(corr_mat, pha_id, fs, min_sep_sec=0.03)`
+  从互相关结果中提取主峰和次峰，构造带权相对极性测量。
+- `apply_pair_validity_mask(r, abs1, abs2, cc_min=None, weight_min=None)`
+  按相关峰值和主次峰差值对测量进行有效性筛选。
+- `choose_device(rank)`
+  根据运行环境自动选择 `cuda`、`mps` 或 `cpu`。
+- `load_job_list()`
+  生成全部 `台站 × 分量 × 相位` 任务列表。
+- `first_left_singular_vector(r_k)`
+  对单个观测块执行奇异值分解，并取第一左奇异向量。
+- `build_feature_column(temp_mat, detected_mat, pha_id, fs)`
+  对一个观测块计算事件特征列。当前实现会先剔除全零波形行，再做相关和 SVD。
+- `main()`
+  使用 MPI 分发观测块任务，汇总所有 rank 的结果并写出最终事件特征矩阵。
+
+`cc_cal.py` 还支持以下环境变量：
+
+- `CC_TEMPLATE_BATCH_SIZE`
+  模板批处理大小，控制一次送入 GPU 的模板数。
+- `CC_RELATIVE_POLARITY_MODE`
+  相对极性模式。默认 `shelly2016_proxy`，另提供 `shelly2016_signed_cc` 和 `legacy_peak_gap`。
+- `CC_SVD_MODE`
+  奇异值分解模式，可选 `reduced` 或 `lowrank`。
+- `CC_SVD_NITER`
+  当 `CC_SVD_MODE=lowrank` 时的迭代次数。
+
+### `cluster.py`
+
+#### 配置数据类
+
+- `DistanceCutConfig`
+  保存基于距离阈值切树时的参数。
+- `MaxClustCutConfig`
+  保存基于目标簇数切树时的参数。
+
+#### 聚类与数据处理函数
+
+- `get_cut_plan(n_valid)`
+  根据当前切树模式返回 `fcluster` 所需参数。
+- `load_psvd(candidates)`
+  从候选文件中读取事件特征矩阵。
+- `sanitize_psvd(X)`
+  去除非有限值和零向量行。
+- `l2_normalize_rows(X, eps=1e-12)`
+  对事件特征做逐行归一化。
+- `relabel_by_size(labels)`
+  按簇大小重新编号，使最大的簇编号为 1。
+- `build_cluster_order(labels)`
+  构造簇编号、簇成员索引和簇大小。
+- `cosine_distance(a, b)`
+  计算两个向量之间的余弦距离。
+- `cluster_medoid_info(X_proc_full, labels, all_event_ids, cluster_ids)`
+  为每个簇选出代表向量和代表事件编号。
+- `hierarchical_cluster_psvd(X)`
+  主聚类函数，完成清洗、距离计算、层次聚类和切树。
+
+#### 文本输出函数
+
+- `save_cluster_summary(out_file, cluster_ids, cluster_sizes, medoid_eids)`
+  保存簇摘要文本。
+- `save_cluster_distance_matrix(out_file, shown_cluster_ids, medoid_vecs)`
+  保存展示簇之间的距离矩阵。
+
+#### 事件位置与时间处理函数
+
+- `get_event_xyz_from_dic(all_dic, event_ids)`
+  从目录中提取事件的经纬度和深度。
+- `collect_event_arrays(all_dic, event_ids)`
+  从目录中提取事件时间、位置、深度和震级。
+- `lonlat_to_local_km(lon, lat)`
+  将经纬度转换到局部千米坐标。
+
+#### 绘图辅助函数
+
+- `build_cluster_palette(cluster_ids)`
+  为展示簇建立颜色表。
+- `_mag_scale(mag)`
+  根据震级计算散点大小缩放系数。
+- `mag_to_plotly_size(mag, base_size)`
+  生成 Plotly 用的点大小数组。
+- `export_html_plotly_slider_by_cluster(...)`
+  输出带时间滑条的三维 HTML 图。
+- `plot_map_and_profiles(...)`
+  输出平面图和两个剖面图。
+
+#### 主入口
+
+- `main()`
+  连接目录、特征矩阵、聚类和可视化，完成整个聚类流程。
+
+### `lib/cut.py`
+
+- `read_fsta(fsta)`
+  读取台站文件。
+- `read_fpha_list(fpha)`
+  读取目录文件，并组织成带事件信息和拾取字典的结构。
+- `read_pha_simplified(fpha)`
+  读取目录文件并保留原始行文本，供重新写目录时使用。
+- `iter_event_waveform_jobs(sta_names)`
+  展开 `台站 × 分量 × 相位` 任务。
+- `build_waveform_groups(event_dic, event_ids, data_path, sta_name, channel, phase_id)`
+  按 `waveform_path` 对事件分组，并保留每个事件原始矩阵行号。
+- `load_waveforms(data_path, event_dic, event_ids, sta_name="XX.C038", channel="BHZ", phase_id=1)`
+  针对一个观测块切出二维波形矩阵。当前实现会先按 `waveform_path` 分组，再逐文件读取和处理，以减少重复磁盘读取。
+
+### `lib/corr.py`
+
+- `correlate_conv1d_matrix(data1, temp, mode="full")`
+  使用 `torch.nn.functional.conv1d` 计算一批模板和一批待比对波形之间的归一化互相关。
+
+## 聚类参数说明
+
+`cluster.py` 当前支持两种切树方式：
+
+- `CLUSTER_CUT_MODE = "distance"`
+  使用 `DISTANCE_CUT.threshold` 作为聚类树的距离阈值。
+- `CLUSTER_CUT_MODE = "maxclust"`
+  使用 `MAXCLUST_CUT.n_clusters` 作为目标簇数。
+
+其他常用参数包括：
+
+- `LINKAGE_METHOD`
+  层次聚类 linkage 方法，当前默认 `average`。
+- `NORMALIZE_ROWS`
+  是否在聚类前做逐行归一化。
+- `TOP_N_SHOW`
+  图件和 HTML 中重点展示的最大簇数。
+- `EXPORT_HTML`
+  是否输出 HTML 时间滑条。
+
+## 当前实现中的计算特点
+
+### 波形切片阶段
+
+- 每个 `台站 × 分量 × 相位` 组合生成一个矩阵文件。
+- 切片前会对波形做去均值、去趋势、余弦 taper 和带通滤波。
+- 当前实现会先按 `waveform_path` 对事件分组，因此同一个日波形文件在单个 job 中通常只会被读取一次。
+- 虽然处理顺序按文件分组进行了重排，但最终仍通过原始 `row index` 写回矩阵，所以事件行号保持不变。
+
+### 特征构建阶段
+
+- 每个观测块都会构造一个 `detected × template` 的测量矩阵。
+- 当前实现会自动跳过全零模板行和全零待分类行，避免把没有波形的数据送去做相关和 SVD。
+- 只保留奇异值分解的第一左奇异向量，作为该观测块对应的事件特征列。
+- 默认使用 Shelly-proxy 模式，即 signed correlation coefficient 加低 CC 置零；
+  旧版 peak-gap 加权模式仅作为兼容保留。
+
+### 聚类阶段
+
+- 聚类使用事件特征向量之间的 cosine distance。
+- 无效行和零向量行不会参与聚类，最终在输出标签中记为 0。
+- 聚类结果会按照簇大小重新排序，方便后续查看。
+
+## 推荐运行顺序
+
+如果从头开始运行，推荐顺序如下：
+
+```bash
+sbatch submit_step0_select.sh
+sbatch submit_step1_cut_waveforms.sh
+sbatch submit_step2_cc_cal_gpu.sh
+sbatch submit_step3_cluster.sh
+```
+
+如果已经有 `temp.pha`、`detected.pha` 和波形矩阵，则可以从对应阶段直接开始。
+
+## 运行环境
+
+当前代码依赖以下主要 Python 包：
+
+- `numpy`
+- `scipy`
+- `matplotlib`
+- `obspy`
+- `mpi4py`
+- `torch`
+- `plotly`
+
+建议在 `obspy` conda 环境中运行。
