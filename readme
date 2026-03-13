@@ -229,6 +229,10 @@ sbatch submit_step1_cut_waveforms.sh
 
 矩阵的行顺序与目录文件中的事件顺序一致。
 
+当前 `submit_step1_cut_waveforms.sh` 默认按 freeosc 的 CPU 节点下限配置成 `4 nodes × 24 ranks/node`。这是为了尽量提高 Step 1 的吞吐量；如果实际运行时共享存储 I/O 压力太大，可以把节点数降回 `1-2`。
+
+Step 1 当前优先按 Slurm task 环境变量 `SLURM_PROCID/SLURM_NTASKS` 切分任务，因此即使集群上的 `mpi4py` 没有正确组成跨节点通信器，也不会影响这一阶段的多节点并行。
+
 ### Step 2：构建事件特征矩阵
 
 ```bash

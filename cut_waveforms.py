@@ -1,7 +1,7 @@
 import os
+import socket
 
 import numpy as np
-from mpi4py import MPI
 
 import config
 from lib.cut import iter_event_waveform_jobs, load_waveforms, read_fpha_list, read_fsta
@@ -10,6 +10,21 @@ from lib.cut import iter_event_waveform_jobs, load_waveforms, read_fpha_list, re
 def prepare_jobs():
     sta_dict = read_fsta(config.fsta)
     return list(iter_event_waveform_jobs(sta_dict.keys()))
+
+
+def get_parallel_context():
+    slurm_rank = os.environ.get("SLURM_PROCID")
+    slurm_size = os.environ.get("SLURM_NTASKS")
+    if slurm_rank is not None and slurm_size is not None:
+        return int(slurm_rank), int(slurm_size), "slurm"
+
+    try:
+        from mpi4py import MPI
+    except Exception:
+        return 0, 1, "serial"
+
+    comm = MPI.COMM_WORLD
+    return comm.Get_rank(), comm.Get_size(), "mpi"
 
 
 def cut_catalog_waveforms(dataset_name, catalog_path, output_dir, jobs_for_rank, rank):
@@ -32,18 +47,16 @@ def cut_catalog_waveforms(dataset_name, catalog_path, output_dir, jobs_for_rank,
 
 
 def main():
-    comm = MPI.COMM_WORLD
-    rank = comm.Get_rank()
-    size = comm.Get_size()
+    rank, size, launch_mode = get_parallel_context()
+    hostname = socket.gethostname()
 
-    if rank == 0:
-        jobs = prepare_jobs()
-        job_splits = np.array_split(np.array(jobs, dtype=object), size)
-    else:
-        job_splits = None
-
-    job_splits = comm.bcast(job_splits, root=0)
+    jobs = prepare_jobs()
+    job_splits = np.array_split(np.array(jobs, dtype=object), size)
     jobs_for_rank = [tuple(job) for job in job_splits[rank].tolist()]
+    print(
+        f"[PARALLEL] mode={launch_mode} rank={rank} size={size} "
+        f"host={hostname} jobs={len(jobs_for_rank)}"
+    )
 
     datasets = [
         ("detected", config.fdetected, config.output_detected),
